@@ -4,7 +4,10 @@ import numpy as np
 import paddle
 import paddle.inference as paddle_infer
 
-def infer(predictor, infer_name):
+warm_up_times = 20
+test_times = 120
+
+def infer(predictor, infer_name, attn, x, mask):
     input_names = predictor.get_input_names()
     feed_tensors = [predictor.get_input_handle(name) for name in input_names]
 
@@ -35,15 +38,15 @@ def main():
     mask = np.random.uniform(-1, 1, [16, 12, 128, 128]).astype('float32')
     x = np.random.rand(16, 128, 768).astype('float32')
 
-    warm_up_times = 20
-    test_times = 120
+
 
     args = parse_args()
     path = args.model_file
+    print(path)
     ######################
     # 原生模型推理#########
     ######################
-    loaded_func = paddle.jit.load(path)
+    loaded_func = paddle.jit.load(path[:-8])
 
     for i in range(test_times):
         if i == warm_up_times:
@@ -63,7 +66,7 @@ def main():
     config.set_prog_file(path)
     config.enable_use_gpu(100, 0)
     predictor = paddle_infer.create_predictor(config)
-    infer(predictor, "paddle inference")
+    infer(predictor, "paddle inference", attn, x, mask)
 
 
 
@@ -81,9 +84,12 @@ def main():
     config.switch_ir_debug(True)
 
     predictor = paddle_infer.create_predictor(config)
-    infer(predictor, "paddle inference with trt_fp32")
+    infer(predictor, "paddle inference with trt_fp32", attn, x, mask)
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_file", type=str)
     return parser.parse_args()
+
+if __name__ == "__main__":
+    main()
