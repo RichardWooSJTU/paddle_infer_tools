@@ -7,6 +7,15 @@ import paddle.inference as paddle_infer
 warm_up_times = 10
 test_times = 30
 
+bsz = 64
+nb_head = 12
+max_seq_len = 512
+slimmed_seq_len = 128
+c = 768
+
+with_trt = True
+with_fp16 = False
+
 def infer(predictor, infer_name, attn, x, mask, new_mask):
     input_names = predictor.get_input_names()
     feed_tensors = [predictor.get_input_handle(name) for name in input_names]
@@ -40,7 +49,7 @@ def check(ndarray1, name1, ndarray2, name2):
     print("{}与{}推理相同？{}".format(name1, name2, 
         np.array_equal(ndarray1, ndarray2)))
 
-def run(path, with_trt, attn, x, mask, new_mask):
+def run(path, attn, x, mask, new_mask):
     ######################
     # 原生模型推理#########
     ######################
@@ -68,10 +77,21 @@ def run(path, with_trt, attn, x, mask, new_mask):
     predictor = paddle_infer.create_predictor(config)
     out_infer = infer(predictor, "paddle inference", attn, x, mask, new_mask)
 
+    
+    # print("原生推理与inference推理相同？", np.array_equal(out_origin, out_infer))
+    # print("原生推理与trt推理相同？", np.array_equal(out_origin, out_trt))
+    # print("inference推理与trt推理相同？", np.array_equal(out_infer, out_trt))
+    # diff = out_infer - out_trt
+    # print(np.where(diff > 0.000001))
+    return out_infer
 
-    if with_trt == False:
-        check(out_origin, "原生推理", out_infer, "inference推理")
-        return out_infer
+def run_trt(with_fp16, path, attn, x, mask, new_mask):
+    if with_fp16:
+        f = 16
+        pre_mode = paddle_infer.PrecisionType.Half
+    else: 
+        f = 32
+        pre_mode = paddle_infer.PrecisionType.Float32
     ######################
     #trt 推理#
     ######################
@@ -81,10 +101,9 @@ def run(path, with_trt, attn, x, mask, new_mask):
     config.enable_tensorrt_engine(workspace_size = 1 << 30, 
                                 max_batch_size = 1, 
                                 min_subgraph_size = 0, 
-                                precision_mode=paddle_infer.PrecisionType.Half, 
+                                precision_mode=pre_mode, 
                                 use_static = False, use_calib_mode = False)
     config.switch_ir_debug(True)
-    nb_head = mask.shape[1]
     min_input_shape = {
         'attn': [1, nb_head, 1, 1],
         'mask': [1, nb_head, 1, 1],
@@ -108,36 +127,31 @@ def run(path, with_trt, attn, x, mask, new_mask):
                                   optim_input_shape=opt_input_shape)
 
     predictor = paddle_infer.create_predictor(config)
-    out_trt = infer(predictor, "paddle inference with trt_fp32", attn, x, mask, new_mask)
-    print("原生推理与inference推理相同？", np.array_equal(out_origin, out_infer))
-    print("原生推理与trt推理相同？", np.array_equal(out_origin, out_trt))
-    print("inference推理与trt推理相同？", np.array_equal(out_infer, out_trt))
-    diff = out_infer - out_trt
-    print(np.where(diff > 0.000001))
-    return out_trt
+
+    out_trt = infer(predictor, "paddle inference with trt_fp{}".format(f), attn, x, mask, new_mask)
 
 def main():
-    bsz = 64
-    nb_head = 12
-    max_seq_len = 512
-    slimmed_seq_len = 128
-    c = 768
-    attn = np.random.rand(bsz, nb_head, max_seq_len, max_seq_len).astype('float32')
-    mask = np.random.uniform(-1, 1, [bsz, nb_head, max_seq_len, max_seq_len]).astype('float32')
-    x = np.random.rand(bsz, max_seq_len, c).astype('float32')
-    new_mask = np.random.rand(bsz, nb_head, slimmed_seq_len, slimmed_seq_len).astype('float32')
-    
     args = parse_args()
-    path = args.fused_model_file
-    out_fused = run(path, True, attn, x, mask, new_mask)
-    # path = args.net_model_file
-    # out_net = run(path, False, attn, x, mask, new_mask)
-    # print("net推理与fused推理相同？", np.array_equal(out_fused, out_net))
+    dtype = 'float16' if with_fp16 else 'float32'
+    print("===================")
+    print(dtype)
+    attn = np.random.rand(bsz, nb_head, max_seq_len, max_seq_len).astype(dtype)
+    mask = np.random.uniform(-1, 1, [bsz, nb_head, max_seq_len, max_seq_len]).astype(dtype)
+    x = np.random.rand(bsz, max_seq_len, c).astype(dtype)
+    new_mask = np.random.rand(bsz, nb_head, slimmed_seq_len, slimmed_seq_len).astype(dtype)
+    
+    path = args.first_model_file
+    # out = run(path, attn, x, mask, new_mask)
+    if with_trt:
+        run_trt(with_fp16, path, attn, x, mask, new_mask)
+    else:
+        run(path, attn, x, mask, new_mask)
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fused_model_file", type=str)
-    parser.add_argument("--net_model_file", type=str)
+    parser.add_argument("--first_model_file", type=str)
+    parser.add_argument("--second_model_file", type=str)
     return parser.parse_args()
 
 if __name__ == "__main__":
