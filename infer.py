@@ -4,10 +4,10 @@ import numpy as np
 import paddle
 import paddle.inference as paddle_infer
 
-warm_up_times = 20
-test_times = 120
+warm_up_times = 10
+test_times = 30
 
-def infer(predictor, infer_name, attn, x, mask):
+def infer(predictor, infer_name, attn, x, mask, new_mask):
     input_names = predictor.get_input_names()
     feed_tensors = [predictor.get_input_handle(name) for name in input_names]
 
@@ -22,27 +22,25 @@ def infer(predictor, infer_name, attn, x, mask):
             'attn': attn,
             'x': x,
             'mask': mask,
+            'new_mask': new_mask
         }
 
         for name_i, name in enumerate(input_names):
             feed_tensors[name_i].copy_from_cpu(feed_dicts[name])
 
         predictor.run()
-        # out = fetch_tensors[0].copy_to_cpu()
-
+        out = fetch_tensors[0].copy_to_cpu()
+        
+    
     infer_predict_time = (time.time() - start) / (test_times - warm_up_times)
     print(infer_name, "推理用时: ", infer_predict_time)
+    return out
 
-def main():
-    attn = np.random.rand(16, 12, 128, 128).astype('float32')
-    mask = np.random.uniform(-1, 1, [16, 12, 128, 128]).astype('float32')
-    x = np.random.rand(16, 128, 768).astype('float32')
+def check(ndarray1, name1, ndarray2, name2):
+    print("{}与{}推理相同？{}".format(name1, name2, 
+        np.array_equal(ndarray1, ndarray2)))
 
-
-
-    args = parse_args()
-    path = args.model_file
-    print(path)
+def run(path, with_trt, attn, x, mask, new_mask):
     ######################
     # 原生模型推理#########
     ######################
@@ -54,8 +52,10 @@ def main():
         attn_t = paddle.to_tensor(attn)
         mask_t = paddle.to_tensor(mask)
         x_t = paddle.to_tensor(x)
-        loaded_func(attn_t, x_t, mask_t)
+        new_mask_t = paddle.to_tensor(new_mask)
+        out_origin = loaded_func(attn_t, x_t, mask_t, new_mask_t)
     origin_predict_time = (time.time() - start) / (test_times - warm_up_times)
+    out_origin = out_origin.numpy()
     print("原生推理用时: ", origin_predict_time)
 
 
@@ -66,10 +66,12 @@ def main():
     config.set_prog_file(path)
     config.enable_use_gpu(100, 0)
     predictor = paddle_infer.create_predictor(config)
-    infer(predictor, "paddle inference", attn, x, mask)
+    out_infer = infer(predictor, "paddle inference", attn, x, mask, new_mask)
 
 
-
+    if with_trt == False:
+        check(out_origin, "原生推理", out_infer, "inference推理")
+        return out_infer
     ######################
     #trt 推理#
     ######################
@@ -79,34 +81,63 @@ def main():
     config.enable_tensorrt_engine(workspace_size = 1 << 30, 
                                 max_batch_size = 1, 
                                 min_subgraph_size = 0, 
-                                precision_mode=paddle_infer.PrecisionType.Float32, 
+                                precision_mode=paddle_infer.PrecisionType.Half, 
                                 use_static = False, use_calib_mode = False)
     config.switch_ir_debug(True)
+    nb_head = mask.shape[1]
     min_input_shape = {
-        'attn': [1, 12, 1, 1],
-        'mask': [1, 12, 1, 1],
-        'x': [1, 1, 1]
+        'attn': [1, nb_head, 1, 1],
+        'mask': [1, nb_head, 1, 1],
+        'x': [1, 1, 1],
+        'new_mask': [1, nb_head, 1, 1]
     }
     max_input_shape = {
-        'attn': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
-        'mask': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
-        'x': [x.shape[0], x.shape[1], x.shape[2]]
+        'attn': [attn.shape[0], nb_head, attn.shape[2], attn.shape[2]],
+        'mask': [attn.shape[0], nb_head, attn.shape[2], attn.shape[2]],
+        'x': [x.shape[0], x.shape[1], x.shape[2]],
+        'new_mask': [attn.shape[0], nb_head, attn.shape[2], attn.shape[2]]
     }
     opt_input_shape = {
-        'attn': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
-        'mask': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
-        'x': [x.shape[0], x.shape[1], x.shape[2]]
+        'attn': [attn.shape[0], nb_head, attn.shape[2], attn.shape[2]],
+        'mask': [attn.shape[0], nb_head, attn.shape[2], attn.shape[2]],
+        'x': [x.shape[0], x.shape[1], x.shape[2]],
+        'new_mask': [new_mask.shape[0], nb_head, new_mask.shape[2], new_mask.shape[2]]
     }
     config.set_trt_dynamic_shape_info(min_input_shape=min_input_shape,
                                   max_input_shape=max_input_shape,
                                   optim_input_shape=opt_input_shape)
 
     predictor = paddle_infer.create_predictor(config)
-    infer(predictor, "paddle inference with trt_fp32", attn, x, mask)
+    out_trt = infer(predictor, "paddle inference with trt_fp32", attn, x, mask, new_mask)
+    print("原生推理与inference推理相同？", np.array_equal(out_origin, out_infer))
+    print("原生推理与trt推理相同？", np.array_equal(out_origin, out_trt))
+    print("inference推理与trt推理相同？", np.array_equal(out_infer, out_trt))
+    diff = out_infer - out_trt
+    print(np.where(diff > 0.000001))
+    return out_trt
+
+def main():
+    bsz = 64
+    nb_head = 12
+    max_seq_len = 512
+    slimmed_seq_len = 128
+    c = 768
+    attn = np.random.rand(bsz, nb_head, max_seq_len, max_seq_len).astype('float32')
+    mask = np.random.uniform(-1, 1, [bsz, nb_head, max_seq_len, max_seq_len]).astype('float32')
+    x = np.random.rand(bsz, max_seq_len, c).astype('float32')
+    new_mask = np.random.rand(bsz, nb_head, slimmed_seq_len, slimmed_seq_len).astype('float32')
+    
+    args = parse_args()
+    path = args.fused_model_file
+    out_fused = run(path, True, attn, x, mask, new_mask)
+    # path = args.net_model_file
+    # out_net = run(path, False, attn, x, mask, new_mask)
+    # print("net推理与fused推理相同？", np.array_equal(out_fused, out_net))
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_file", type=str)
+    parser.add_argument("--fused_model_file", type=str)
+    parser.add_argument("--net_model_file", type=str)
     return parser.parse_args()
 
 if __name__ == "__main__":

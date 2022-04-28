@@ -12,17 +12,16 @@ def parse_args():
 
 
 def export_fused():
-    def op(attn, x, mask):
+    def op(attn, x, mask, new_mask):
         if _non_static_mode():
-            return _C_ops.fused_token_prune(attn, x, mask, 'factor', 0.5)
+            return _C_ops.fused_token_prune(attn, x, mask, new_mask)
         else:
             helper = LayerHelper('fused_token_prune', **locals())
             out = helper.create_variable_for_type_inference('float32')
             helper.append_op(
                 type='fused_token_prune',
-                inputs={'Attn': attn, 'X': x, 'Mask': mask},
-                outputs={'SlimmedX': out},
-                attrs={'factor': 0.5})
+                inputs={'Attn': attn, 'X': x, 'Mask': mask, 'NewMask': new_mask},
+                outputs={'SlimmedX': out})
             return out
     
     op = paddle.jit.to_static(op)
@@ -34,20 +33,20 @@ def export_fused():
         input_spec=[
             paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='attn'),
             paddle.static.InputSpec(shape=[None, None, None], dtype='float32', name='x'),
-            paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='mask')],
+            paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='mask'),
+            paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='new_mask')],
     )
 
 
 
 def export_net():
-    def take_along_axis(x, indices):
-        C = paddle.shape(x)[2]
-        # C = 768
-        indices = paddle.unsqueeze(indices, axis=-1)
-        indices = paddle.tile(indices, repeat_times=(1, 1, C))
-        return paddle.take_along_axis(x, indices, axis=1)
-
-    def forward(attn, x, mask):
+    def forward(attn, x, mask, new_mask):
+        def take_along_axis(x, indices):
+            C = paddle.shape(x)[2]
+            # C = 768
+            indices = paddle.unsqueeze(indices, axis=-1)
+            indices = paddle.tile(indices, repeat_times=(1, 1, C))
+            return paddle.take_along_axis(x, indices, axis=1)
         tensor_shape = paddle.shape(x) #x.shape
         B = tensor_shape[0]#.numpy()[0]
         N = tensor_shape[1]
@@ -61,8 +60,8 @@ def export_net():
         cls_ind = paddle.zeros(tensor_shape[0], dtype= paddle.int64 ).unsqueeze(axis=1)
         cls_inds = paddle.concat([cls_ind, paddle.slice(inds, axes=[1], starts=[0], ends=[N-1])], axis=1)
         
-        
-        max_slimmed_seq_len = int(N * 0.5)
+        tensor_shape = paddle.shape(new_mask)
+        max_slimmed_seq_len = tensor_shape[2]
         cls_inds = cls_inds[:,:max_slimmed_seq_len]
 
         paddle.fluid.layers.Print(x)
@@ -79,7 +78,8 @@ def export_net():
         input_spec=[
             paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='attn'),
             paddle.static.InputSpec(shape=[None, None, None], dtype='float32', name='x'),
-            paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='mask')],
+            paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='mask'),
+            paddle.static.InputSpec(shape=[None, 12, None, None], dtype='float32', name='new_mask')],
     )
 
 if __name__ == "__main__":
