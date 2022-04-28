@@ -78,10 +78,28 @@ def main():
     config.enable_use_gpu(100, 0)
     config.enable_tensorrt_engine(workspace_size = 1 << 30, 
                                 max_batch_size = 1, 
-                                min_subgraph_size = 1, 
+                                min_subgraph_size = 0, 
                                 precision_mode=paddle_infer.PrecisionType.Float32, 
                                 use_static = False, use_calib_mode = False)
     config.switch_ir_debug(True)
+    min_input_shape = {
+        'attn': [1, 12, 1, 1],
+        'mask': [1, 12, 1, 1],
+        'x': [1, 1, 1]
+    }
+    max_input_shape = {
+        'attn': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
+        'mask': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
+        'x': [x.shape[0], x.shape[1], x.shape[2]]
+    }
+    opt_input_shape = {
+        'attn': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
+        'mask': [attn.shape[0], 12, attn.shape[2], attn.shape[2]],
+        'x': [x.shape[0], x.shape[1], x.shape[2]]
+    }
+    config.set_trt_dynamic_shape_info(min_input_shape=min_input_shape,
+                                  max_input_shape=max_input_shape,
+                                  optim_input_shape=opt_input_shape)
 
     predictor = paddle_infer.create_predictor(config)
     infer(predictor, "paddle inference with trt_fp32", attn, x, mask)
