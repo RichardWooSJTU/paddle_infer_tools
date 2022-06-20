@@ -9,6 +9,13 @@ import json
 # 借鉴于https://github.com/jerryzh168/pytorch/blob/fb09fd4ab4ba618db148f9dfc035be589efb9355/torch/fx/experimental/fx2trt/tools/engine_layer_visualize.py
 # 不同之处在于本脚本面向trt inspector输出的详细profile信息，不支持trtexec.因此完全使用profile的详细数据生成，不受log打印数据限制 
 
+style = {
+    "shape": "record",
+    "fillcolor": "Salmon",
+    "style": '"filled,rounded"',
+    "fontcolor": "#000000",
+}
+
 class LayerInfo(NamedTuple):
     kernel_name: str
     layer_name: str
@@ -56,7 +63,7 @@ class LayerInfo(NamedTuple):
         output_names = []
         output_types = []
         kernel_name = layer_dic["LayerType"]
-        layer_name = layer_dic["Name"]
+        layer_name = layer_dic["Name"].replace(":", "-")
         tactic = layer_dic["TacticValue"]
         for input_dict in layer_dic["Inputs"]:
             input_names.append(input_dict["Name"])
@@ -88,10 +95,15 @@ def build_node(layer):
 def build_edge(layer, graph, output_name2node, layer_name2node):
     if layer.input_names is None:
         return
-
+    print("=======")
+    print(layer.layer_name)
+    print("=======")
     for input_name, input_type in zip(layer.input_names, layer.input_types):
-        
-        from_node = output_name2node[input_name]
+        print(input_name)
+        if input_name in output_name2node:
+            from_node = output_name2node[input_name]
+        else:
+            from_node = input_name
 
         edge_name = input_name.replace(">", "\\>")
         graph.add_edge(
@@ -103,7 +115,7 @@ def build_edge(layer, graph, output_name2node, layer_name2node):
         )
 
 def main():
-    f = open("engine_info.json")
+    f = open("/backup/wfs/dasou/infer/nlg/base_mp1/engine_info.json")
     layers = []
     data = json.load(f)
     for layer_dict in data["Layers"]:
@@ -125,13 +137,13 @@ def main():
     for layer in layers:
         build_edge(layer, dot_graph, output_name2node, layer_name2node)
 
-    dot_graph.write_raw(f"EngineLayers.dot")
+    dot_graph.write_pdf("trt_engine.pdf")
 
-    import pydot
+    # dot_graph.write_raw(f"EngineLayers.dot")
 
-    graphs = pydot.graph_from_dot_file("EngineLayers.dot")
-    graph = graphs[0]
-    graph.write_png("trt_engine.png")
+    # graphs = pydot.graph_from_dot_file("EngineLayers.dot")
+    # graph = graphs[0]
+    # graph.write_png("trt_engine.png")
 
 if __name__ == "__main__":
     main()
